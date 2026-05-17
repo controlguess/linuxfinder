@@ -90,7 +90,6 @@ check_dependency tput ncurses
 clear
 printf "\nEnter download path: "
 read -r DOWNLOAD_DIR
-
 mkdir -p "$DOWNLOAD_DIR" || exit 1
 
 selected=0
@@ -98,98 +97,81 @@ PATH_STACK=()
 
 get_current_json() {
     local jq_path="."
-
     for p in "${PATH_STACK[@]}"; do
         jq_path="$jq_path[\"$p\"]"
     done
-
     printf "%s" "$FILES" | jq "$jq_path"
 }
 
 draw_menu() {
     clear
-
     CURRENT=$(get_current_json)
-
     mapfile -t ITEMS < <(printf "%s" "$CURRENT" | jq -r 'keys[]')
-
     COUNT=${#ITEMS[@]}
-
-    printf "\nDistroBin\n\n"
-
-    for i in "${!ITEMS[@]}"; do
+    WIDTH=$(tput cols)
+    HEIGHT=$(tput lines)
+    INSTR="Enter = open/download | LeftArrow = back"
+    MAX_DISPLAY=$((HEIGHT - 3))
+    ROW_START=$((selected / MAX_DISPLAY * MAX_DISPLAY))
+    ROW_END=$((ROW_START + MAX_DISPLAY - 1))
+    [ $ROW_END -ge $((COUNT - 1)) ] && ROW_END=$((COUNT - 1))
+    MAX_LENGTH=0
+    for ITEM in "${ITEMS[@]}"; do
+        [ ${#ITEM} -gt $MAX_LENGTH ] && MAX_LENGTH=${#ITEM}
+    done
+    COL_WIDTH=$((MAX_LENGTH + 2))
+    for i in $(seq $ROW_START $ROW_END); do
         ITEM="${ITEMS[$i]}"
-
         TYPE=$(printf "%s" "$CURRENT" | jq -r --arg k "$ITEM" '.[$k] | type')
-
-        if [ "$TYPE" = "object" ]; then
-            DISPLAY="$ITEM/"
-        else
-            DISPLAY="$ITEM"
-        fi
-
+        [ "$TYPE" = "object" ] && DISPLAY="$ITEM/" || DISPLAY="$ITEM"
         if [ "$i" -eq "$selected" ]; then
-            printf "${DIM}${WHITE}> %s${RESET}\n" "$DISPLAY"
+            printf "> %-${MAX_LENGTH}s\n" "$DISPLAY"
         else
-            printf "  %s\n" "$DISPLAY"
+            printf "  %-${MAX_LENGTH}s\n" "$DISPLAY"
         fi
     done
-
-
-    printf "\nEnter = open/download | LeftArrow = back\n"
+    printf "\n%s\n" "$INSTR"
 }
 
 download_file() {
     local name="$1"
     local url="$2"
-
     filename=$(basename "$url")
-
     clear
     printf "\nDownloading: %s\n\n" "$name"
-
     curl -L --progress-bar "$url" -o "$DOWNLOAD_DIR/$filename"
-
     printf "\nPress Enter to continue..."
     read -r _
 }
 
 while true; do
     draw_menu
-
     IFS= read -rsn1 key
-
     CURRENT=$(get_current_json)
     mapfile -t ITEMS < <(printf "%s" "$CURRENT" | jq -r 'keys[]')
     COUNT=${#ITEMS[@]}
 
     if [[ "$key" == $'\x1b' ]]; then
-    read -rsn2 key2
-
-    case "$key2" in
-        '[A') # Up
-            ((selected--))
-            [ "$selected" -lt 0 ] && selected=$((COUNT - 1))
-            ;;
-
-        '[B') # Down
-            ((selected++))
-            [ "$selected" -ge "$COUNT" ] && selected=0
-            ;;
-
-        '[D') # Left arrow
-            if [ "${#PATH_STACK[@]}" -gt 0 ]; then
-                unset 'PATH_STACK[-1]'
-                selected=0
-            fi
-            ;;
-    esac
-
+        read -rsn2 key2
+        case "$key2" in
+            '[A') 
+                ((selected--))
+                [ "$selected" -lt 0 ] && selected=$((COUNT - 1))
+                ;;
+            '[B') 
+                ((selected++))
+                [ "$selected" -ge "$COUNT" ] && selected=0
+                ;;
+            '[D') 
+                if [ "${#PATH_STACK[@]}" -gt 0 ]; then
+                    unset 'PATH_STACK[-1]'
+                    selected=0
+                fi
+                ;;
+        esac
     elif [[ "$key" == "" ]]; then
         ITEM="${ITEMS[$selected]}"
-
         TYPE=$(printf "%s" "$CURRENT" | jq -r --arg k "$ITEM" '.[$k] | type')
-
         if [ "$TYPE" = "object" ]; then
             PATH_STACK+=("$ITEM")
             selected=0
