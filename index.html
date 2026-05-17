@@ -104,7 +104,7 @@ updateClock();
 async function loadDeployments(){
     const repo="controlguess/linuxfinder";
     const branch="main";
-    const url=`https://api.github.com/repos/${repo}/commits?sha=${branch}&per_page=5`;
+    const url=`https://api.github.com/repos/${repo}/commits?sha=${branch}&per_page=9`;
     try{
         const res=await fetch(url);
         const data=await res.json();
