@@ -118,7 +118,7 @@ async function loadDeployments(){
             const author=commit.commit.author.name;
             const date=new Date(commit.commit.author.date).toLocaleString();
             const link=commit.html_url;
-            list+=`${msg} by ${author} - ${date}\n${link}\n\n`;
+            list+=`${msg} - ${date}\n\n`;
         });
         document.getElementById("deploymentsList").innerText=list;
     }catch(e){
