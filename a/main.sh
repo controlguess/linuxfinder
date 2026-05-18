@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
 
-# =======================
-#        DistroBin
-# =======================
-
 FILES='
 {
 	"Linux Downloads": {
@@ -110,7 +106,8 @@ draw_menu() {
     COUNT=${#ITEMS[@]}
     WIDTH=$(tput cols)
     HEIGHT=$(tput lines)
-    INSTR="Enter = open/download | LeftArrow = back"
+    VIEWING=$((selected + 1))
+	INSTR="Enter = open/download | LeftArrow = back ($VIEWING/$COUNT)"
     MAX_DISPLAY=$((HEIGHT - 3))
     ROW_START=$((selected / MAX_DISPLAY * MAX_DISPLAY))
     ROW_END=$((ROW_START + MAX_DISPLAY - 1))
