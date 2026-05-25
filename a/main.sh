@@ -39,29 +39,29 @@ FILES='
 '
 
 install_package() {
-    PACKAGE="$1"
+    local packages=("$@")
 
     if command -v apt >/dev/null 2>&1; then
         sudo apt update
-        sudo apt install -y "$PACKAGE"
+        sudo apt install -y "${packages[@]}"
 
     elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -Sy --noconfirm "$PACKAGE"
+        sudo pacman -Sy --noconfirm "${packages[@]}"
 
     elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y "$PACKAGE"
+        sudo dnf install -y "${packages[@]}"
 
     elif command -v yum >/dev/null 2>&1; then
-        sudo yum install -y "$PACKAGE"
+        sudo yum install -y "${packages[@]}"
 
     elif command -v zypper >/dev/null 2>&1; then
-        sudo zypper install -y "$PACKAGE"
+        sudo zypper install -y "${packages[@]}"
 
     elif command -v apk >/dev/null 2>&1; then
-        sudo apk add "$PACKAGE"
+        sudo apk add "${packages[@]}"
 
     elif command -v brew >/dev/null 2>&1; then
-        brew install "$PACKAGE"
+        brew install "${packages[@]}"
 
     else
         echo "Unsupported package manager."
@@ -69,19 +69,24 @@ install_package() {
     fi
 }
 
-check_dependency() {
-    CMD="$1"
-    PKG="$2"
+MISSING=()
 
-    if ! command -v "$CMD" >/dev/null 2>&1; then
-        echo "Installing missing dependency: $PKG"
-        install_package "$PKG"
-    fi
+check_dependency() {
+    command -v "$1" >/dev/null 2>&1 || MISSING+=("$2")
 }
 
 check_dependency curl curl
 check_dependency jq jq
 check_dependency tput ncurses
+
+[ ${#MISSING[@]} -gt 0 ] && install_package "${MISSING[@]}"
+
+HISTORY_FILE="$HOME/.download_history.json"
+touch "$HISTORY_FILE"
+
+if ! jq empty "$HISTORY_FILE" >/dev/null 2>&1; then
+    echo "[]" > "$HISTORY_FILE"
+fi
 
 clear
 printf "\nEnter download path: "
@@ -90,85 +95,230 @@ mkdir -p "$DOWNLOAD_DIR" || exit 1
 
 selected=0
 PATH_STACK=()
+DOWNLOAD_PIDS=()
+
+cleanup() {
+    tput sgr0
+    tput cnorm
+    clear
+}
+
+trap cleanup EXIT INT TERM
+
+tput civis
+
+notify() {
+    local msg="$1"
+
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send "Downloader" "$msg"
+
+    elif command -v osascript >/dev/null 2>&1; then
+        osascript -e "display notification \"$msg\" with title \"Downloader\""
+
+    elif command -v powershell.exe >/dev/null 2>&1; then
+        powershell.exe -Command "[System.Windows.MessageBox]::Show('$msg','Downloader')" >/dev/null 2>&1
+    fi
+}
+
+add_history() {
+    local name="$1"
+    local url="$2"
+    local status="$3"
+
+    tmp=$(mktemp)
+
+    jq \
+        --arg name "$name" \
+        --arg url "$url" \
+        --arg status "$status" \
+        --arg date "$(date '+%Y-%m-%d %H:%M:%S')" \
+        '. += [{
+            name: $name,
+            url: $url,
+            status: $status,
+            date: $date
+        }]' \
+        "$HISTORY_FILE" > "$tmp"
+
+    mv "$tmp" "$HISTORY_FILE"
+}
 
 get_current_json() {
     local jq_path="."
+
     for p in "${PATH_STACK[@]}"; do
         jq_path="$jq_path[\"$p\"]"
     done
+
     printf "%s" "$FILES" | jq "$jq_path"
 }
 
 draw_menu() {
-    clear
     CURRENT=$(get_current_json)
+
     mapfile -t ITEMS < <(printf "%s" "$CURRENT" | jq -r 'keys[]')
+
     COUNT=${#ITEMS[@]}
-    WIDTH=$(tput cols)
     HEIGHT=$(tput lines)
-    VIEWING=$((selected + 1))
-	INSTR="Enter = open/download | LeftArrow = back ($VIEWING/$COUNT)"
-    MAX_DISPLAY=$((HEIGHT - 3))
+
+    MAX_DISPLAY=$((HEIGHT - 6))
     ROW_START=$((selected / MAX_DISPLAY * MAX_DISPLAY))
     ROW_END=$((ROW_START + MAX_DISPLAY - 1))
+
     [ $ROW_END -ge $((COUNT - 1)) ] && ROW_END=$((COUNT - 1))
-    MAX_LENGTH=0
-    for ITEM in "${ITEMS[@]}"; do
-        [ ${#ITEM} -gt $MAX_LENGTH ] && MAX_LENGTH=${#ITEM}
-    done
-    COL_WIDTH=$((MAX_LENGTH + 2))
-    for i in $(seq $ROW_START $ROW_END); do
-        ITEM="${ITEMS[$i]}"
-        TYPE=$(printf "%s" "$CURRENT" | jq -r --arg k "$ITEM" '.[$k] | type')
-        [ "$TYPE" = "object" ] && DISPLAY="$ITEM/" || DISPLAY="$ITEM"
-        if [ "$i" -eq "$selected" ]; then
-            printf "> %-${MAX_LENGTH}s\n" "$DISPLAY"
-        else
-            printf "  %-${MAX_LENGTH}s\n" "$DISPLAY"
+
+    tput cup 0 0
+    tput ed
+
+    BREADCRUMB="/"
+
+    if [ ${#PATH_STACK[@]} -gt 0 ]; then
+        BREADCRUMB="/$(IFS=/; echo "${PATH_STACK[*]}")"
+    fi
+
+    ACTIVE=0
+
+    for pid in "${DOWNLOAD_PIDS[@]}"; do
+        if kill -0 "$pid" >/dev/null 2>&1; then
+            ((ACTIVE++))
         fi
     done
-    printf "\n%s\n" "$INSTR"
+
+    printf "Path: %s\n" "$BREADCRUMB"
+    printf "Downloads Active: %s\n\n" "$ACTIVE"
+
+    for i in $(seq $ROW_START $ROW_END); do
+        ITEM="${ITEMS[$i]}"
+
+        TYPE=$(printf "%s" "$CURRENT" | jq -r --arg k "$ITEM" '.[$k] | type')
+
+        if [ "$TYPE" = "object" ]; then
+            DISPLAY="$ITEM/"
+        else
+            DISPLAY="$ITEM"
+        fi
+
+        if [ "$i" -eq "$selected" ]; then
+            tput rev
+            printf "  %s\n" "$DISPLAY"
+            tput sgr0
+        else
+            printf "  %s\n" "$DISPLAY"
+        fi
+    done
+
+    printf "\n↑↓ Navigate | Enter Open/Download | ← Back | D Active Downloads | H History | Q Quit\n"
+}
+
+show_history() {
+    clear
+
+    printf "Download History\n\n"
+
+    jq -r '
+        reverse |
+        .[] |
+        "[\(.date)] \(.status | ascii_upcase) - \(.name)"
+    ' "$HISTORY_FILE"
+
+    printf "\nPress Enter to continue..."
+    read -r _
+}
+
+show_downloads() {
+    clear
+
+    printf "Active Downloads\n\n"
+
+    ACTIVE_FOUND=0
+
+    for pid in "${DOWNLOAD_PIDS[@]}"; do
+        if kill -0 "$pid" >/dev/null 2>&1; then
+            echo "PID $pid running"
+            ACTIVE_FOUND=1
+        fi
+    done
+
+    [ "$ACTIVE_FOUND" -eq 0 ] && echo "No active downloads."
+
+    printf "\nPress Enter to continue..."
+    read -r _
 }
 
 download_file() {
     local name="$1"
     local url="$2"
-    filename=$(basename "$url")
-    clear
-    printf "\nDownloading: %s\n\n" "$name"
-    curl -L --progress-bar "$url" -o "$DOWNLOAD_DIR/$filename"
-    printf "\nPress Enter to continue..."
-    read -r _
+
+    (
+        filename=$(basename "$url")
+        target="$DOWNLOAD_DIR/$filename"
+
+        if [ -f "$target" ]; then
+            add_history "$name" "$url" "skipped"
+            notify "$filename already exists"
+            exit 0
+        fi
+
+        if curl \
+            -L \
+            -C - \
+            --retry 5 \
+            --retry-delay 2 \
+            --progress-bar \
+            "$url" \
+            -o "$target"; then
+
+            add_history "$name" "$url" "completed"
+            notify "Finished downloading $filename"
+
+        else
+            add_history "$name" "$url" "failed"
+            notify "Failed downloading $filename"
+        fi
+    ) &
+
+    DOWNLOAD_PIDS+=("$!")
 }
 
 while true; do
     draw_menu
+
     IFS= read -rsn1 key
+
     CURRENT=$(get_current_json)
+
     mapfile -t ITEMS < <(printf "%s" "$CURRENT" | jq -r 'keys[]')
+
     COUNT=${#ITEMS[@]}
 
     if [[ "$key" == $'\x1b' ]]; then
         read -rsn2 key2
+
         case "$key2" in
-            '[A') 
+            '[A')
                 ((selected--))
                 [ "$selected" -lt 0 ] && selected=$((COUNT - 1))
                 ;;
-            '[B') 
+
+            '[B')
                 ((selected++))
                 [ "$selected" -ge "$COUNT" ] && selected=0
                 ;;
-            '[D') 
+
+            '[D')
                 if [ "${#PATH_STACK[@]}" -gt 0 ]; then
                     unset 'PATH_STACK[-1]'
                     selected=0
                 fi
                 ;;
         esac
+
     elif [[ "$key" == "" ]]; then
         ITEM="${ITEMS[$selected]}"
+
         TYPE=$(printf "%s" "$CURRENT" | jq -r --arg k "$ITEM" '.[$k] | type')
+
         if [ "$TYPE" = "object" ]; then
             PATH_STACK+=("$ITEM")
             selected=0
@@ -176,5 +326,14 @@ while true; do
             URL=$(printf "%s" "$CURRENT" | jq -r --arg k "$ITEM" '.[$k]')
             download_file "$ITEM" "$URL"
         fi
+
+    elif [[ "$key" =~ [Qq] ]]; then
+        break
+
+    elif [[ "$key" =~ [Hh] ]]; then
+        show_history
+
+    elif [[ "$key" =~ [Dd] ]]; then
+        show_downloads
     fi
 done
