@@ -82,6 +82,10 @@ check_dependency tput ncurses
 [ ${#MISSING[@]} -gt 0 ] && install_package "${MISSING[@]}"
 
 HISTORY_FILE="$HOME/.download_history.json"
+DOWNLOAD_STATE_DIR="$HOME/.download_state"
+
+mkdir -p "$DOWNLOAD_STATE_DIR"
+
 touch "$HISTORY_FILE"
 
 if ! jq empty "$HISTORY_FILE" >/dev/null 2>&1; then
@@ -186,18 +190,14 @@ draw_menu() {
     done
 
     printf "Path: %s\n" "$BREADCRUMB"
-    printf "Downloads Active: %s\n\n" "$ACTIVE"
+    printf "Downloads Active: %s | Running in background\n\n" "$ACTIVE"
 
     for i in $(seq $ROW_START $ROW_END); do
         ITEM="${ITEMS[$i]}"
 
         TYPE=$(printf "%s" "$CURRENT" | jq -r --arg k "$ITEM" '.[$k] | type')
 
-        if [ "$TYPE" = "object" ]; then
-            DISPLAY="$ITEM/"
-        else
-            DISPLAY="$ITEM"
-        fi
+        [ "$TYPE" = "object" ] && DISPLAY="$ITEM/" || DISPLAY="$ITEM"
 
         if [ "$i" -eq "$selected" ]; then
             tput rev
@@ -208,7 +208,7 @@ draw_menu() {
         fi
     done
 
-    printf "\n↑↓ Navigate | Enter Open/Download | ← Back | D Active Downloads | H History | Q Quit\n"
+    printf "\n↑↓ Navigate | Enter Open/Download | ← Back | D Downloads | H History | Q Quit\n"
 }
 
 show_history() {
@@ -229,18 +229,22 @@ show_history() {
 show_downloads() {
     clear
 
-    printf "Active Downloads\n\n"
+    printf "Downloads\n\n"
 
-    ACTIVE_FOUND=0
+    FOUND=0
 
-    for pid in "${DOWNLOAD_PIDS[@]}"; do
-        if kill -0 "$pid" >/dev/null 2>&1; then
-            echo "PID $pid running"
-            ACTIVE_FOUND=1
-        fi
+    for status in "$DOWNLOAD_STATE_DIR"/*.status; do
+        [ -e "$status" ] || continue
+
+        FOUND=1
+
+        NAME=$(basename "$status" .status)
+        STATE=$(cat "$status")
+
+        printf "%-50s %s\n" "$NAME" "$STATE"
     done
 
-    [ "$ACTIVE_FOUND" -eq 0 ] && echo "No active downloads."
+    [ "$FOUND" -eq 0 ] && echo "No downloads."
 
     printf "\nPress Enter to continue..."
     read -r _
@@ -254,7 +258,15 @@ download_file() {
         filename=$(basename "$url")
         target="$DOWNLOAD_DIR/$filename"
 
+        SAFE=$(printf '%s' "$filename" | tr '/ :' '___')
+
+        LOG="$DOWNLOAD_STATE_DIR/$SAFE.log"
+        STATUS="$DOWNLOAD_STATE_DIR/$SAFE.status"
+
+        echo "running" > "$STATUS"
+
         if [ -f "$target" ]; then
+            echo "skipped" > "$STATUS"
             add_history "$name" "$url" "skipped"
             notify "$filename already exists"
             exit 0
@@ -265,15 +277,23 @@ download_file() {
             -C - \
             --retry 5 \
             --retry-delay 2 \
-            --progress-bar \
+            --silent \
+            --show-error \
             "$url" \
-            -o "$target"; then
+            -o "$target" \
+            >"$LOG" 2>&1; then
+
+            echo "completed" > "$STATUS"
 
             add_history "$name" "$url" "completed"
+
             notify "Finished downloading $filename"
 
         else
+            echo "failed" > "$STATUS"
+
             add_history "$name" "$url" "failed"
+
             notify "Failed downloading $filename"
         fi
     ) &
